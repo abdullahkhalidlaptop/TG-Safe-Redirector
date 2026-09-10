@@ -1038,6 +1038,9 @@ def forbidden(e):
 # ==================================================================
 #  RUN (local only — on Vercel this is ignored)
 # ==================================================================
+# Vercel WSGI entry point — required for @vercel/python
+handler = app
+
 if __name__ == "__main__":
     print("\n" + "=" * 74)
     print(f"🚀 Redirector           http://{SERVER_HOST}:{SERVER_PORT}")

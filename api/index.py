@@ -3,6 +3,7 @@ import time
 import json
 import base64
 import secrets
+import string
 import datetime
 import threading
 from urllib.parse import urlparse
@@ -13,7 +14,7 @@ load_dotenv()
 import requests
 from flask import (
     Flask, request, render_template_string, abort, jsonify,
-    redirect as flask_redirect,
+    redirect as flask_redirect, Response,
 )
 
 import firebase_admin
@@ -59,7 +60,7 @@ SHRINKEARN_ENDPOINT = env("SHRINKEARN_ENDPOINT", "https://shrinkearn.com/api")
 PUBLIC_BASE_URL = env("PUBLIC_BASE_URL", "http://127.0.0.1:8999").rstrip("/")
 
 BRAND = {
-    "name":          env("BRAND_NAME",     "AK Mods Files"),
+    "name":          env("BRAND_NAME",     "AKM Secure Files"),
     "tagline":       env("BRAND_TAGLINE",  "Premium Mods & Files"),
     "logo":          env("BRAND_LOGO",     ""),
     "logo_fallback": env("BRAND_LOGO_FALLBACK", "🎬"),
@@ -70,9 +71,21 @@ BRAND = {
     "footer":        env("BRAND_FOOTER",   "Powered by AK Mods"),
 }
 
+# ---- Favicon ----
+FAVICON_URL = env(
+    "FAVICON_URL",
+    "https://raw.githubusercontent.com/itisak-51/AKMods-Redirector/refs/heads/main/favicon.png",
+)
+
+# Card auto-close timing
+CARD_HOLD_SECONDS      = env_int("CARD_HOLD_SECONDS", 5)
+CARD_COUNTDOWN_SECONDS = env_int("CARD_COUNTDOWN_SECONDS", 3)
+
 SERVER_HOST  = env("HOST", "0.0.0.0")
 SERVER_PORT  = env_int("PORT", 8999)
 SERVER_DEBUG = env_bool("DEBUG", True)
+
+ALPHABET = string.ascii_lowercase + string.digits
 
 
 # ==================================================================
@@ -81,20 +94,15 @@ SERVER_DEBUG = env_bool("DEBUG", True)
 def init_firebase():
     if firebase_admin._apps:
         return
-
     if FIREBASE_KEY_JSON:
         cred = credentials.Certificate(json.loads(FIREBASE_KEY_JSON))
     else:
         key_path = FIREBASE_KEY_PATH
         if not os.path.isabs(key_path):
-            key_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                key_path,
-            )
+            key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), key_path)
         if not os.path.exists(key_path):
             raise RuntimeError(f"Service account JSON not found: {key_path}")
         cred = credentials.Certificate(key_path)
-
     firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_RTDB_URL})
 
 
@@ -149,6 +157,49 @@ def rate_ok(ip: str) -> bool:
 
 
 # ==================================================================
+#  RANDOM UNIQUE IDS
+# ==================================================================
+def _random_string(length: int) -> str:
+    return ''.join(secrets.choice(ALPHABET) for _ in range(length))
+
+
+def generate_unique_file_id(max_tries: int = 15) -> str:
+    for _ in range(max_tries):
+        fid = _random_string(12)
+        try:
+            doc = db.collection("links").document(fid).get()
+            if not doc.exists:
+                return fid
+        except Exception:
+            continue
+    raise RuntimeError("Could not generate unique file_id")
+
+
+def generate_unique_alias(max_tries: int = 15) -> str:
+    for _ in range(max_tries):
+        alias = _random_string(7)
+        try:
+            doc = db.collection("used_aliases").document(alias).get()
+            if not doc.exists:
+                return alias
+        except Exception:
+            continue
+    raise RuntimeError("Could not generate unique alias")
+
+
+def mark_alias_used(alias: str, file_id: str, url: str):
+    try:
+        db.collection("used_aliases").document(alias).set({
+            "alias":   alias,
+            "fileId":  file_id,
+            "url":     url,
+            "usedAt":  datetime.datetime.now(datetime.timezone.utc),
+        })
+    except Exception as e:
+        print(f"  [WARN] Could not mark alias used: {e}")
+
+
+# ==================================================================
 #  WRITES
 # ==================================================================
 def log_bypass(reason, ip, ua, referer, extra=None):
@@ -170,9 +221,7 @@ def log_bypass(reason, ip, ua, referer, extra=None):
 
 def increment_downloads(token, alias, ip, ua):
     try:
-        db.collection("links").document(token).update(
-            {"downloads": firestore.Increment(1)}
-        )
+        db.collection("links").document(token).update({"downloads": firestore.Increment(1)})
         db.collection("clicks").add({
             "token": token, "alias": alias,
             "timestamp": datetime.datetime.now(datetime.timezone.utc),
@@ -194,10 +243,7 @@ def create_session(url, alias, token):
     sid = secrets.token_urlsafe(20)
     now = datetime.datetime.now(datetime.timezone.utc)
     db.collection("sessions").document(sid).set({
-        "url": url,
-        "alias": alias,
-        "token": token,
-        "used": False,
+        "url": url, "alias": alias, "token": token, "used": False,
         "createdAt": now,
         "expiresAt": now + datetime.timedelta(minutes=SESSION_TTL),
     })
@@ -234,11 +280,7 @@ def consume_session_txn(transaction, doc_ref):
 def call_shrinkearn(destination_url: str, alias: str):
     if not SHRINKEARN_API_KEY:
         return {"ok": False, "error": "SHRINKEARN_API_KEY not configured"}
-    params = {
-        "api": SHRINKEARN_API_KEY,
-        "url": destination_url,
-        "alias": alias,
-    }
+    params = {"api": SHRINKEARN_API_KEY, "url": destination_url, "alias": alias}
     try:
         r = requests.get(SHRINKEARN_ENDPOINT, params=params, timeout=25)
         data = r.json()
@@ -254,6 +296,37 @@ def build_gate_url(file_id: str) -> str:
     return f"{PUBLIC_BASE_URL}/gate?k={GATE_KEY}&t={file_id}"
 
 
+def build_middle_url(file_id: str) -> str:
+    return f"{PUBLIC_BASE_URL}/gate?k={GATE_KEY}&t={file_id}&admin={ADMIN_KEY}"
+
+
+# ==================================================================
+#  FAVICON — generated SVG fallback
+# ==================================================================
+FAVICON_SVG = """
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+    <defs>
+        <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="ACCENT"/>
+            <stop offset="100%" stop-color="ACCENT_LIGHT"/>
+        </linearGradient>
+    </defs>
+    <rect width="100" height="100" rx="22" fill="url(#g)"/>
+    <text x="50" y="56" font-size="58" text-anchor="middle"
+          dominant-baseline="middle" fill="white">EMOJI</text>
+</svg>
+"""
+
+
+def _favicon_fallback():
+    svg = (FAVICON_SVG
+           .replace("ACCENT", BRAND["accent"])
+           .replace("ACCENT_LIGHT", BRAND["accent"] + "cc")
+           .replace("EMOJI", BRAND["logo_fallback"] or "🔗"))
+    return Response(svg, mimetype="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 # ==================================================================
 #  TEMPLATES
 # ==================================================================
@@ -264,7 +337,9 @@ REDIRECT_HTML = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="{{ b.accent }}">
-<title>{{ b.name }} — Open in Telegram</title>
+<link rel="icon" href="{{ favicon_url }}" type="image/png">
+<link rel="apple-touch-icon" href="{{ favicon_url }}">
+<title>{{ b.name }}</title>
 <style>
     :root {
         --accent: {{ b.accent }};
@@ -286,6 +361,7 @@ REDIRECT_HTML = """
         display: flex; flex-direction: column; justify-content: space-between;
         box-shadow: 0 24px 70px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.05) inset;
         animation: pop .38s ease-out; overflow: hidden;
+        position: relative;
     }
     @keyframes pop {
         from { opacity: 0; transform: translateY(14px) scale(.97); }
@@ -339,6 +415,37 @@ REDIRECT_HTML = """
     @keyframes spin { to { transform: rotate(360deg); } }
     .loading .spinner { display: inline-block; }
     .loading .btn-label { opacity: .85; }
+
+    .countdown {
+        position: absolute; inset: 0;
+        background: rgba(0,0,0,.82);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        display: none; flex-direction: column;
+        align-items: center; justify-content: center;
+        text-align: center; padding: 20px;
+        border-radius: 26px;
+        animation: fadeIn .3s ease-out;
+        z-index: 10;
+    }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .countdown-text {
+        font-size: clamp(18px, 5.5vw, 28px);
+        font-weight: 800; letter-spacing: -.3px;
+        color: #fff; line-height: 1.3;
+        margin-bottom: 18px;
+    }
+    .countdown-num {
+        font-size: clamp(52px, 16vw, 88px);
+        font-weight: 900; color: var(--accent);
+        line-height: 1;
+        text-shadow: 0 0 30px var(--accent);
+        animation: pulse-num .9s ease-in-out infinite;
+    }
+    @keyframes pulse-num {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50% { transform: scale(1.08); opacity: .85; }
+    }
 </style>
 </head>
 <body>
@@ -356,18 +463,29 @@ REDIRECT_HTML = """
         </div>
     </div>
     <div class="bottom">
-        <button class="btn" id="openBtn" onclick="openOnce()">
+        <button class="btn" id="openBtn" onclick="openNow()">
             <span class="spinner"></span>
             <span class="btn-label">Open in Telegram</span>
         </button>
         <div class="footer">{{ b.footer }}</div>
     </div>
+
+    <div class="countdown" id="countdown">
+        <div class="countdown-text" id="cd-text">Closing Site in</div>
+        <div class="countdown-num" id="cd-num">3</div>
+    </div>
 </div>
+
 <script>
     const TOKEN = {{ token|tojson }};
     const INITIAL = {{ initial_count|tojson }};
+    const SID = {{ sid|tojson }};
+    const HOLD_SECONDS = {{ hold_seconds|tojson }};
+    const COUNTDOWN_FROM = {{ countdown_seconds|tojson }};
+
     const dlEl = document.getElementById('dl-count');
     dlEl.textContent = (INITIAL || 0).toLocaleString();
+
     async function refreshCount() {
         try {
             const r = await fetch('/api/count/' + encodeURIComponent(TOKEN));
@@ -377,12 +495,53 @@ REDIRECT_HTML = """
     }
     setInterval(refreshCount, 4000);
     setTimeout(refreshCount, 500);
-    function openOnce() {
+
+    let clicked = false;
+
+    function goToTelegram() {
+        window.location.href = "/go?s=" + encodeURIComponent(SID);
+    }
+
+    function openNow() {
+        if (clicked) return;
+        clicked = true;
         const btn = document.getElementById('openBtn');
         btn.classList.add("loading");
         btn.querySelector(".btn-label").textContent = "Opening…";
-        window.location.href = "/go?s=" + encodeURIComponent({{ sid|tojson }});
+        goToTelegram();
     }
+
+    function startCountdown() {
+        if (clicked) return;
+
+        const cd     = document.getElementById('countdown');
+        const cdNum  = document.getElementById('cd-num');
+        const cdText = document.getElementById('cd-text');
+
+        cd.style.display = "flex";
+        cdText.textContent = "Closing Site in";
+
+        let n = COUNTDOWN_FROM;
+
+        function tick() {
+            if (clicked) return;
+            if (n > 0) {
+                cdNum.textContent = n;
+                n--;
+                setTimeout(tick, 1000);
+            } else {
+                cdNum.textContent = "✓";
+                cdText.textContent = "Close The Site";
+                setTimeout(() => {
+                    clicked = true;
+                    goToTelegram();
+                }, 400);
+            }
+        }
+        tick();
+    }
+
+    setTimeout(startCountdown, HOLD_SECONDS * 1000);
 </script>
 </body>
 </html>
@@ -396,8 +555,10 @@ BYPASS_HTML = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#dc2626">
+<link rel="icon" href="{{ favicon_url }}" type="image/png">
+<link rel="apple-touch-icon" href="{{ favicon_url }}">
 <meta name="robots" content="noindex,nofollow">
-<title>Verification Required — {{ b.name }}</title>
+<title>{{ b.name }} — Verification Required</title>
 <style>
     :root { --danger: #dc2626; --danger-soft: #7f1d1d;
             --bg: {{ b.bg }}; --card: {{ b.card }}; --text: {{ b.text }};
@@ -494,50 +655,43 @@ ADMIN_HTML = """
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="{{ favicon_url }}" type="image/png">
+<link rel="apple-touch-icon" href="{{ favicon_url }}">
 <title>{{ b.name }} — Admin</title>
 <style>
     * { box-sizing: border-box; }
-    body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-        background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px 16px;
-    }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+           background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px 16px; }
     .wrap { max-width: 1200px; margin: 0 auto; }
     h1 { margin: 0 0 4px; font-size: 22px; }
     h2 { font-size: 16px; margin-top: 36px; margin-bottom: 12px; }
     .sub { opacity: .55; margin-bottom: 24px; font-size: 13px; }
 
-    .stats {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        gap: 14px; margin-bottom: 24px;
-    }
-    .stat {
-        background: #1e293b; border-radius: 12px; padding: 16px 18px;
-        border: 1px solid rgba(255,255,255,.06);
-    }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+             gap: 14px; margin-bottom: 24px; }
+    .stat { background: #1e293b; border-radius: 12px; padding: 16px 18px;
+            border: 1px solid rgba(255,255,255,.06); }
     .stat-label { font-size: 11px; opacity: .55; text-transform: uppercase; letter-spacing: .8px; }
     .stat-value { font-size: 26px; font-weight: 700; margin-top: 6px; color: #22c55e; }
     .stat-value.danger { color: #f87171; }
 
     .create-box {
         background: #1e293b; border: 1px solid rgba(56,189,248,.3);
-        border-radius: 12px; padding: 20px;
-        margin-bottom: 28px;
+        border-radius: 12px; padding: 20px; margin-bottom: 28px;
         box-shadow: 0 4px 20px rgba(56,189,248,.08);
     }
     .create-box h2 { margin: 0 0 16px; color: #38bdf8; }
     .form-row {
-        display: grid; grid-template-columns: 140px 1fr 200px auto;
+        display: grid; grid-template-columns: 1fr auto;
         gap: 10px; align-items: end;
     }
-    @media (max-width: 900px) {
-        .form-row { grid-template-columns: 1fr; }
-    }
+    @media (max-width: 700px) { .form-row { grid-template-columns: 1fr; } }
     .form-field label {
         display: block; font-size: 11px; opacity: .65;
         text-transform: uppercase; letter-spacing: .6px; margin-bottom: 5px;
     }
     .form-field input {
-        width: 100%; padding: 11px 13px;
+        width: 100%; padding: 12px 14px;
         background: #0b1220; color: #e2e8f0;
         border: 1px solid rgba(255,255,255,.1);
         border-radius: 8px; font-size: 13px;
@@ -548,28 +702,44 @@ ADMIN_HTML = """
         box-shadow: 0 0 0 3px rgba(56,189,248,.15);
     }
     .btn-create {
-        padding: 11px 22px;
-        background: #38bdf8; color: #06263a;
+        padding: 12px 26px; background: #38bdf8; color: #06263a;
         border: none; border-radius: 8px;
-        font-weight: 700; font-size: 13px;
+        font-weight: 700; font-size: 13.5px;
         cursor: pointer; white-space: nowrap;
     }
     .btn-create:hover { background: #22a8e0; }
     .btn-create:disabled { opacity: .6; cursor: not-allowed; }
 
     .form-result {
-        margin-top: 14px; padding: 12px 14px; border-radius: 8px;
-        font-size: 12.5px; font-family: ui-monospace, monospace;
-        display: none;
+        margin-top: 16px; padding: 0;
+        font-size: 13px; display: none;
     }
-    .form-result.success {
-        background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.3);
-        color: #4ade80; display: block;
+    .form-result.success, .form-result.error { display: block; }
+    .result-box {
+        background: #0b1220; border-radius: 10px; padding: 16px 18px;
+        font-family: ui-monospace, monospace;
     }
-    .form-result.error {
-        background: rgba(220,38,38,.1); border: 1px solid rgba(220,38,38,.3);
-        color: #fca5a5; display: block;
+    .form-result.success .result-box { border: 1px solid rgba(34,197,94,.3); }
+    .form-result.error .result-box { border: 1px solid rgba(220,38,38,.3); color: #fca5a5; }
+    .result-label {
+        font-size: 10.5px; text-transform: uppercase; letter-spacing: .8px;
+        opacity: .55; margin-bottom: 4px; margin-top: 12px;
     }
+    .result-label:first-child { margin-top: 0; }
+    .result-value {
+        display: flex; align-items: center; gap: 10px;
+        font-size: 12.5px; word-break: break-all;
+    }
+    .result-value a { color: #38bdf8; text-decoration: none; }
+    .result-value a:hover { text-decoration: underline; }
+    .btn-mini {
+        padding: 3px 9px; border-radius: 5px;
+        font-size: 10.5px; font-weight: 600;
+        border: none; cursor: pointer;
+        background: rgba(56,189,248,.15); color: #38bdf8;
+        white-space: nowrap;
+    }
+    .btn-mini:hover { background: rgba(56,189,248,.25); }
 
     table {
         width: 100%; border-collapse: collapse;
@@ -635,25 +805,19 @@ ADMIN_HTML = """
 <body>
 <div class="wrap">
     <h1>{{ b.name }} — Admin Dashboard</h1>
-    <div class="sub">Create, manage, and monitor all short links</div>
+    <div class="sub">Paste a Telegram link — get 3 links back instantly</div>
 
     <div class="create-box">
-        <h2>➕ Create New Short Link</h2>
+        <h2>➕ Create Short Link</h2>
         <div class="form-row">
             <div class="form-field">
-                <label>File ID</label>
-                <input type="text" id="fId" placeholder="529596">
-            </div>
-            <div class="form-field">
                 <label>Destination URL (Telegram link)</label>
-                <input type="text" id="fUrl" placeholder="https://t.me/AKM_Files_Store_Bot?start=529596">
-            </div>
-            <div class="form-field">
-                <label>Alias (short link name)</label>
-                <input type="text" id="fAlias" placeholder="Mod_A">
+                <input type="text" id="fUrl"
+                       placeholder="https://t.me/AKM_Files_Store_Bot?start=529596"
+                       onkeydown="if(event.key==='Enter')createShort()">
             </div>
             <button class="btn-create" id="btnCreate" onclick="createShort()">
-                Create &amp; Shorten
+                Generate Links
             </button>
         </div>
         <div class="form-result" id="formResult"></div>
@@ -703,7 +867,7 @@ ADMIN_HTML = """
         t.textContent = msg;
         t.className = "toast show" + (isError ? " error" : "");
         clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => { t.className = "toast"; }, 2000);
+        toastTimer = setTimeout(() => { t.className = "toast"; }, 2200);
     }
 
     function load() {
@@ -723,15 +887,12 @@ ADMIN_HTML = """
                     const shortCell = l.short_url
                         ? `<a href="${l.short_url}" target="_blank">${l.short_url}</a>`
                         : `<span class="no-short">${l.shorten_error ? "Failed: " + l.shorten_error : "Not shortened"}</span>`;
-
                     const retryBtn = !l.short_url
                         ? `<button class="btn-sm btn-retry" onclick="retryShorten('${l.token}')">↻ Shorten</button>`
                         : "";
-
                     const copyBtn = l.short_url
                         ? `<button class="btn-sm btn-copy" onclick="copyText('${l.short_url}')">📋 Copy</button>`
                         : "";
-
                     return `
                     <tr>
                         <td><strong>${l.token || l.alias || "—"}</strong></td>
@@ -751,7 +912,8 @@ ADMIN_HTML = """
                 }).join("");
             })
             .catch(err => {
-                document.getElementById("rows").innerHTML = '<tr><td colspan="6" class="error">' + err.message + '</td></tr>';
+                document.getElementById("rows").innerHTML =
+                    '<tr><td colspan="6" class="error">' + err.message + '</td></tr>';
             });
 
         api("/api/bypasses")
@@ -779,54 +941,75 @@ ADMIN_HTML = """
             .catch(() => {});
     }
 
-    function createShort() {
-        const id    = document.getElementById("fId").value.trim();
-        const url   = document.getElementById("fUrl").value.trim();
-        const alias = document.getElementById("fAlias").value.trim();
-        const btn   = document.getElementById("btnCreate");
-        const res   = document.getElementById("formResult");
+    function renderResult(d) {
+        const res = document.getElementById("formResult");
+        if (d.ok) {
+            res.className = "form-result success";
+            res.innerHTML = `
+                <div class="result-box">
+                    <div class="result-label">✅ Generated Link (public)</div>
+                    <div class="result-value">
+                        <a href="${d.short_url}" target="_blank">${d.short_url}</a>
+                        <button class="btn-mini" onclick="copyText('${d.short_url}')">📋 Copy</button>
+                    </div>
 
-        if (!id || !url) {
+                    <div class="result-label">🧪 Middle Link (admin testing only — do not share)</div>
+                    <div class="result-value">
+                        <a href="${d.middle_url}" target="_blank">${d.middle_url}</a>
+                        <button class="btn-mini" onclick="copyText('${d.middle_url}')">📋 Copy</button>
+                    </div>
+
+                    <div class="result-label">🎯 Destination Link</div>
+                    <div class="result-value">
+                        <a href="${d.destination}" target="_blank">${d.destination}</a>
+                        <button class="btn-mini" onclick="copyText('${d.destination}')">📋 Copy</button>
+                    </div>
+                </div>`;
+        } else {
             res.className = "form-result error";
-            res.textContent = "❌ File ID and Destination URL are required.";
+            res.innerHTML = `<div class="result-box">❌ ${d.error || "Unknown error"}</div>`;
+        }
+    }
+
+    function createShort() {
+        const url = document.getElementById("fUrl").value.trim();
+        const btn = document.getElementById("btnCreate");
+        const res = document.getElementById("formResult");
+
+        if (!url) {
+            res.className = "form-result error";
+            res.innerHTML = `<div class="result-box">❌ Destination URL is required.</div>`;
             return;
         }
 
         btn.disabled = true;
-        btn.textContent = "Creating…";
+        btn.textContent = "Generating…";
         res.className = "form-result";
         res.style.display = "none";
 
-        fetch("/api/shorten", {
+        fetch("/api/create", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
                 "X-Admin-Key": KEY
             },
-            body: JSON.stringify({ id, url, alias })
+            body: JSON.stringify({ url })
         })
         .then(r => r.json())
         .then(d => {
             btn.disabled = false;
-            btn.textContent = "Create & Shorten";
-
+            btn.textContent = "Generate Links";
+            renderResult(d);
             if (d.ok) {
-                res.className = "form-result success";
-                res.innerHTML = `✅ Created! Short URL: <a href="${d.short_url}" target="_blank">${d.short_url}</a> &nbsp; <button class="btn-sm btn-copy" onclick="copyText('${d.short_url}')">📋 Copy</button>`;
-                document.getElementById("fId").value = "";
                 document.getElementById("fUrl").value = "";
-                document.getElementById("fAlias").value = "";
                 load();
-            } else {
-                res.className = "form-result error";
-                res.textContent = "❌ " + (d.error || "Unknown error");
             }
         })
         .catch(err => {
             btn.disabled = false;
-            btn.textContent = "Create & Shorten";
+            btn.textContent = "Generate Links";
             res.className = "form-result error";
-            res.textContent = "❌ Network error: " + err.message;
+            res.innerHTML = `<div class="result-box">❌ Network error: ${err.message}</div>`;
         });
     }
 
@@ -845,7 +1028,6 @@ ADMIN_HTML = """
 
     function deleteLink(fileId) {
         if (!confirm("Delete file '" + fileId + "'?\\nThis removes the record and its counter.")) return;
-
         fetch("/api/links/" + encodeURIComponent(fileId), {
             method: "DELETE",
             headers: { "X-Admin-Key": KEY }
@@ -860,7 +1042,7 @@ ADMIN_HTML = """
 
     function copyText(text) {
         navigator.clipboard.writeText(text)
-            .then(() => toast("Copied: " + text))
+            .then(() => toast("Copied!"))
             .catch(() => toast("Copy failed", true));
     }
 
@@ -873,45 +1055,66 @@ ADMIN_HTML = """
 
 
 # ==================================================================
-#  HELPERS
+#  RENDER HELPERS
 # ==================================================================
 def render_wall(title, subtitle, message, cta="Go Back", icon="🔒", status=403):
     return render_template_string(
         BYPASS_HTML, b=BRAND,
         title=title, subtitle=subtitle, message=message, cta=cta, icon=icon,
+        favicon_url=FAVICON_URL,
     ), status
 
 
 # ==================================================================
-#  PUBLIC ROUTES
+#  FAVICON + ROOT
 # ==================================================================
+@app.route("/favicon.ico")
+def favicon():
+    return _favicon_fallback()
+
+
+@app.route("/favicon.svg")
+def favicon_svg():
+    return _favicon_fallback()
+
+
 @app.route("/")
 def home():
     return jsonify({
         "service": BRAND["name"],
         "status": "live",
         "endpoints": [
-            "GET  /gate?k=GATE_KEY&t=FILE_ID",
+            "GET  /gate?k=GATE_KEY&t=FILE_ID[&admin=ADMIN_KEY]",
             "GET  /card?s=SESSION_ID",
             "GET  /go?s=SESSION_ID",
             "GET  /admin?key=ADMIN_KEY",
+            "GET  /favicon.ico",
             "GET  /api/count/<file_id>",
             "GET  /api/links?key=ADMIN_KEY",
             "GET  /api/bypasses?key=ADMIN_KEY",
             "GET  /api/sessions/stats?key=ADMIN_KEY",
-            "GET/POST /api/register",
-            "POST /api/shorten",
+            "GET/POST /api/register      {url}",
+            "GET/POST /api/create        {url}  ← the one-shot",
+            "GET/POST /api/shorten       {url}  (alias for /api/create)",
             "POST /api/links/<id>/shorten",
             "DEL  /api/links/<id>",
         ],
     })
 
 
+# ==================================================================
+#  GATE
+# ==================================================================
 @app.route("/gate")
 def gate():
     ip = client_ip()
     ua = request.headers.get("User-Agent", "")
     referer = request.headers.get("Referer", "")
+
+    admin_bypass = (
+        ADMIN_KEY
+        and request.args.get("admin", "") == ADMIN_KEY
+    )
 
     if request.args.get("k", "") != GATE_KEY:
         log_bypass("bad_gate_key", ip, ua, referer)
@@ -919,19 +1122,20 @@ def gate():
             "The link you used is <strong>missing a valid key</strong>.",
             "Go Back", "🚫", 403)
 
-    if not rate_ok(ip):
-        log_bypass("rate_limit_gate", ip, ua, referer)
-        return render_wall("Too Many Requests", "Slow down a little.",
-            "Please wait a minute and try again.", "Go Back", "⏱️", 429)
+    if not admin_bypass:
+        if not rate_ok(ip):
+            log_bypass("rate_limit_gate", ip, ua, referer)
+            return render_wall("Too Many Requests", "Slow down a little.",
+                "Please wait a minute and try again.", "Go Back", "⏱️", 429)
 
-    if not is_allowed_referer(referer):
-        log_bypass("bad_referer_gate", ip, ua, referer)
-        return render_wall("Verification Bypass Detected",
-            "This link is protected by an integrity check.",
-            "You accessed this link <strong>directly</strong>, bypassing "
-            "the verification step. Please open the original short link and "
-            "complete the verification to continue.",
-            "Go Back & Verify Properly", "🔒", 403)
+        if not is_allowed_referer(referer):
+            log_bypass("bad_referer_gate", ip, ua, referer)
+            return render_wall("Verification Bypass Detected",
+                "This link is protected by an integrity check.",
+                "You accessed this link <strong>directly</strong>, bypassing "
+                "the verification step. Please open the original short link and "
+                "complete the verification to continue.",
+                "Go Back & Verify Properly", "🔒", 403)
 
     file_id = request.args.get("t", "").strip()
     if not file_id:
@@ -950,7 +1154,7 @@ def gate():
             "Please try again in a moment.", "Go Back", "⚠️", 500)
 
     sid = create_session(link["url"], link.get("alias", file_id), file_id)
-    print(f"  [OK ] gate → {sid[:8]}… → {link['url']}")
+    print(f"  [OK ] gate → {sid[:8]}… → {link['url']}{' (admin bypass)' if admin_bypass else ''}")
     return flask_redirect(f"/card?s={sid}")
 
 
@@ -986,6 +1190,9 @@ def card():
     return render_template_string(
         REDIRECT_HTML, b=BRAND,
         token=session["token"], sid=sid, initial_count=initial_count,
+        hold_seconds=CARD_HOLD_SECONDS,
+        countdown_seconds=CARD_COUNTDOWN_SECONDS,
+        favicon_url=FAVICON_URL,
     )
 
 
@@ -1027,6 +1234,7 @@ def go():
         <!DOCTYPE html>
         <html><head><meta charset="UTF-8">
         <meta name="viewport" content="width=device-width,initial-scale=1">
+        <link rel="icon" href="{{ favicon_url }}" type="image/png">
         <title>Opening…</title>
         <style>
             body { margin:0; height:100vh; display:flex; align-items:center; justify-content:center;
@@ -1068,6 +1276,7 @@ def go():
         </body></html>
         """,
         url=url, bg=BRAND["bg"], text=BRAND["text"], accent=BRAND["accent"],
+        favicon_url=FAVICON_URL,
     )
 
 
@@ -1090,7 +1299,7 @@ def api_count(token):
 def admin_panel():
     if not admin_ok():
         return "<h2>403 — Access denied</h2>", 403
-    return render_template_string(ADMIN_HTML, b=BRAND)
+    return render_template_string(ADMIN_HTML, b=BRAND, favicon_url=FAVICON_URL)
 
 
 @app.route("/api/links")
@@ -1143,122 +1352,142 @@ def api_sessions_stats():
         return jsonify({"active": 0})
 
 
-# ------------------------------------------------------------------
-#  REGISTER
-# ------------------------------------------------------------------
+# ==================================================================
+#  CORE API — create (random, one call)
+# ==================================================================
+def _extract_url_from_request():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        return data.get("url", "").strip()
+    return request.args.get("url", "").strip()
+
+
+@app.route("/api/create", methods=["POST", "GET"])
+def api_create():
+    if not admin_ok():
+        abort(403)
+
+    url = _extract_url_from_request()
+    if not url:
+        return jsonify({"ok": False, "error": "Missing url"}), 400
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return jsonify({"ok": False, "error": "Invalid URL — must be http/https"}), 400
+
+    try:
+        file_id = generate_unique_file_id()
+        alias   = generate_unique_alias()
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    gate_url   = build_gate_url(file_id)
+    middle_url = build_middle_url(file_id)
+
+    result = call_shrinkearn(gate_url, alias)
+
+    if not result["ok"]:
+        db.collection("links").document(file_id).set({
+            "url":            url,
+            "alias":          alias,
+            "gate_url":       gate_url,
+            "middle_url":     middle_url,
+            "short_url":      "",
+            "shorten_error":  result["error"],
+            "createdAt":      datetime.datetime.now(datetime.timezone.utc),
+            "creatorId":      "api",
+            "downloads":      0,
+        })
+        mark_alias_used(alias, file_id, url)
+        return jsonify({
+            "ok":          False,
+            "id":          file_id,
+            "gate_url":    gate_url,
+            "middle_url":  middle_url,
+            "destination": url,
+            "error":       result["error"],
+        }), 502
+
+    short_url = result["short_url"]
+    db.collection("links").document(file_id).set({
+        "url":            url,
+        "alias":          alias,
+        "gate_url":       gate_url,
+        "middle_url":     middle_url,
+        "short_url":      short_url,
+        "shorten_error":  "",
+        "createdAt":      datetime.datetime.now(datetime.timezone.utc),
+        "creatorId":      "api",
+        "downloads":      0,
+    })
+    mark_alias_used(alias, file_id, url)
+
+    print(f"  [CREATE] {file_id} → {short_url}")
+
+    return jsonify({
+        "ok":          True,
+        "id":          file_id,
+        "short_url":   short_url,
+        "middle_url":  middle_url,
+        "destination": url,
+        "gate_url":    gate_url,
+    })
+
+
+@app.route("/api/shorten", methods=["POST", "GET"])
+def api_shorten():
+    return api_create()
+
+
+# ==================================================================
+#  REGISTER (no shortening)
+# ==================================================================
 @app.route("/api/register", methods=["GET", "POST"])
 def api_register():
     if not admin_ok():
         abort(403)
 
-    if request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        file_id = data.get("id", "")
-        url     = data.get("url", "")
-        alias   = data.get("alias", file_id)
-    else:
-        file_id = request.args.get("id", "")
-        url     = request.args.get("url", "")
-        alias   = request.args.get("alias", file_id)
-
-    file_id = file_id.strip()
-    url     = url.strip()
-    alias   = (alias or file_id).strip()
-
-    if not file_id or not url:
-        return jsonify({"ok": False, "error": "Missing id or url"}), 400
+    url = _extract_url_from_request()
+    if not url:
+        return jsonify({"ok": False, "error": "Missing url"}), 400
 
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return jsonify({"ok": False, "error": "Invalid URL scheme"}), 400
+        return jsonify({"ok": False, "error": "Invalid URL"}), 400
 
-    gate_url = build_gate_url(file_id)
+    try:
+        file_id = generate_unique_file_id()
+        alias   = generate_unique_alias()
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    gate_url   = build_gate_url(file_id)
+    middle_url = build_middle_url(file_id)
+
     db.collection("links").document(file_id).set({
-        "url": url,
-        "alias": alias,
-        "gate_url": gate_url,
-        "short_url": "",
-        "createdAt": datetime.datetime.now(datetime.timezone.utc),
-        "creatorId": "api",
-        "downloads": 0,
-    }, merge=True)
-
-    return jsonify({"ok": True, "id": file_id, "gate_url": gate_url})
-
-
-# ------------------------------------------------------------------
-#  SHORTEN — register + ShrinkEarn
-# ------------------------------------------------------------------
-@app.route("/api/shorten", methods=["POST", "GET"])
-def api_shorten():
-    if not admin_ok():
-        abort(403)
-
-    if request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        file_id = data.get("id", "")
-        url     = data.get("url", "")
-        alias   = data.get("alias", "")
-    else:
-        file_id = request.args.get("id", "")
-        url     = request.args.get("url", "")
-        alias   = request.args.get("alias", "")
-
-    file_id = file_id.strip()
-    url     = url.strip()
-    alias   = (alias or file_id).strip()
-
-    if not file_id or not url:
-        return jsonify({"ok": False, "error": "Missing id or url"}), 400
-
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return jsonify({"ok": False, "error": "Invalid URL scheme"}), 400
-
-    gate_url = build_gate_url(file_id)
-    result = call_shrinkearn(gate_url, alias)
-
-    if not result["ok"]:
-        db.collection("links").document(file_id).set({
-            "url": url,
-            "alias": alias,
-            "gate_url": gate_url,
-            "short_url": "",
-            "shorten_error": result["error"],
-            "createdAt": datetime.datetime.now(datetime.timezone.utc),
-            "creatorId": "api",
-            "downloads": 0,
-        }, merge=True)
-        return jsonify({
-            "ok": False,
-            "id": file_id,
-            "gate_url": gate_url,
-            "error": result["error"],
-        }), 502
-
-    short_url = result["short_url"]
-    db.collection("links").document(file_id).set({
-        "url": url,
-        "alias": alias,
-        "gate_url": gate_url,
-        "short_url": short_url,
-        "shorten_error": "",
-        "createdAt": datetime.datetime.now(datetime.timezone.utc),
-        "creatorId": "api",
-        "downloads": 0,
-    }, merge=True)
+        "url":            url,
+        "alias":          alias,
+        "gate_url":       gate_url,
+        "middle_url":     middle_url,
+        "short_url":      "",
+        "createdAt":      datetime.datetime.now(datetime.timezone.utc),
+        "creatorId":      "api",
+        "downloads":      0,
+    })
+    mark_alias_used(alias, file_id, url)
 
     return jsonify({
-        "ok": True,
-        "id": file_id,
-        "gate_url": gate_url,
-        "short_url": short_url,
+        "ok":          True,
+        "id":          file_id,
+        "gate_url":    gate_url,
+        "middle_url":  middle_url,
+        "destination": url,
     })
 
 
-# ------------------------------------------------------------------
+# ==================================================================
 #  RETRY SHORTEN
-# ------------------------------------------------------------------
+# ==================================================================
 @app.route("/api/links/<file_id>/shorten", methods=["POST", "GET"])
 def api_reshorten(file_id):
     if not admin_ok():
@@ -1289,9 +1518,9 @@ def api_reshorten(file_id):
     })
 
 
-# ------------------------------------------------------------------
+# ==================================================================
 #  DELETE
-# ------------------------------------------------------------------
+# ==================================================================
 @app.route("/api/links/<file_id>", methods=["DELETE"])
 def api_delete_link(file_id):
     if not admin_ok():
@@ -1320,7 +1549,7 @@ def forbidden(e):
 
 
 # ==================================================================
-#  VERCEL PATH FIX
+#  VERCEL WSGI PATH FIX
 # ==================================================================
 class _StripVercelPrefix:
     def __init__(self, wsgi_app):
@@ -1339,13 +1568,11 @@ class _StripVercelPrefix:
 
 
 app.wsgi_app = _StripVercelPrefix(app.wsgi_app)
-
-# Vercel WSGI entry point
 handler = app
 
 
 # ==================================================================
-#  RUN (local only)
+#  LOCAL RUN
 # ==================================================================
 if __name__ == "__main__":
     print("\n" + "=" * 74)
@@ -1354,5 +1581,6 @@ if __name__ == "__main__":
     print(f"🔑 Gate key             {GATE_KEY}")
     print(f"🌐 Public base URL      {PUBLIC_BASE_URL}")
     print(f"🔥 Firebase RTDB        {FIREBASE_RTDB_URL}")
+    print(f"🖼  Favicon             {FAVICON_URL}")
     print("=" * 74 + "\n")
     app.run(host=SERVER_HOST, port=SERVER_PORT, debug=SERVER_DEBUG)

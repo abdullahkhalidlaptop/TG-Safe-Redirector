@@ -5,7 +5,7 @@ import base64
 import secrets
 import datetime
 import threading
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -36,35 +36,28 @@ def env_bool(key, default=False):
     return os.getenv(key, str(default)).lower() in ("1", "true", "yes", "on")
 
 
-# Firebase
-FIREBASE_RTDB_URL   = env("FIREBASE_RTDB_URL")
-FIREBASE_KEY_PATH   = env("FIREBASE_KEY_PATH", "./serviceAccountKey.json")
-FIREBASE_KEY_JSON   = env("FIREBASE_SERVICE_ACCOUNT_KEY")   # for Vercel
+FIREBASE_RTDB_URL = env("FIREBASE_RTDB_URL")
+FIREBASE_KEY_PATH = env("FIREBASE_KEY_PATH", "./serviceAccountKey.json")
+FIREBASE_KEY_JSON = env("FIREBASE_SERVICE_ACCOUNT_KEY")
 
-# Admin / Gate
 ADMIN_KEY    = env("ADMIN_KEY")
 GATE_KEY     = env("GATE_KEY")
 SESSION_TTL  = env_int("SESSION_TTL_MINUTES", 15)
 
-# Referer
 ALLOWED_REFERER_HOSTS = [
     h.strip().lower()
     for h in env("ALLOWED_REFERER_HOSTS", "tpi.li,shrinkearn.com").split(",")
     if h.strip()
 ]
 
-# Rate limit
 RL_WINDOW = env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
 RL_LIMIT  = env_int("RATE_LIMIT_MAX_REQUESTS", 10)
 
-# ShrinkEarn
 SHRINKEARN_API_KEY  = env("SHRINKEARN_API_KEY")
 SHRINKEARN_ENDPOINT = env("SHRINKEARN_ENDPOINT", "https://shrinkearn.com/api")
 
-# Public base URL (used to build gate URLs)
 PUBLIC_BASE_URL = env("PUBLIC_BASE_URL", "http://127.0.0.1:8999").rstrip("/")
 
-# Branding
 BRAND = {
     "name":          env("BRAND_NAME",     "AK Mods Files"),
     "tagline":       env("BRAND_TAGLINE",  "Premium Mods & Files"),
@@ -77,24 +70,21 @@ BRAND = {
     "footer":        env("BRAND_FOOTER",   "Powered by AK Mods"),
 }
 
-# Server (used only when running locally)
 SERVER_HOST  = env("HOST", "0.0.0.0")
 SERVER_PORT  = env_int("PORT", 8999)
 SERVER_DEBUG = env_bool("DEBUG", True)
 
 
 # ==================================================================
-#  FIREBASE INIT
+#  FIREBASE
 # ==================================================================
 def init_firebase():
     if firebase_admin._apps:
         return
 
     if FIREBASE_KEY_JSON:
-        # Vercel — JSON string in env var
         cred = credentials.Certificate(json.loads(FIREBASE_KEY_JSON))
     else:
-        # Local — path to JSON file
         key_path = FIREBASE_KEY_PATH
         if not os.path.isabs(key_path):
             key_path = os.path.join(
@@ -134,7 +124,6 @@ def client_ip() -> str:
 
 
 def admin_ok() -> bool:
-    """Accepts key via ?key= or X-Admin-Key header."""
     if not ADMIN_KEY:
         return False
     if request.args.get("key", "") == ADMIN_KEY:
@@ -144,7 +133,6 @@ def admin_ok() -> bool:
     return False
 
 
-# ---- rate limiter ----
 _rl_lock = threading.Lock()
 _rl_hits = {}
 
@@ -161,7 +149,7 @@ def rate_ok(ip: str) -> bool:
 
 
 # ==================================================================
-#  FIRESTORE / RTDB WRITES
+#  WRITES
 # ==================================================================
 def log_bypass(reason, ip, ua, referer, extra=None):
     try:
@@ -244,10 +232,8 @@ def consume_session_txn(transaction, doc_ref):
 
 
 def call_shrinkearn(destination_url: str, alias: str):
-    """Call ShrinkEarn API. Returns dict {ok, short_url, error}."""
     if not SHRINKEARN_API_KEY:
         return {"ok": False, "error": "SHRINKEARN_API_KEY not configured"}
-
     params = {
         "api": SHRINKEARN_API_KEY,
         "url": destination_url,
@@ -511,44 +497,167 @@ ADMIN_HTML = """
 <title>{{ b.name }} — Admin</title>
 <style>
     * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-           background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px 16px; }
-    .wrap { max-width: 1100px; margin: 0 auto; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px 16px;
+    }
+    .wrap { max-width: 1200px; margin: 0 auto; }
     h1 { margin: 0 0 4px; font-size: 22px; }
-    h2 { font-size: 16px; margin-top: 36px; }
+    h2 { font-size: 16px; margin-top: 36px; margin-bottom: 12px; }
     .sub { opacity: .55; margin-bottom: 24px; font-size: 13px; }
-    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-             gap: 14px; margin-bottom: 24px; }
-    .stat { background: #1e293b; border-radius: 12px; padding: 16px 18px;
-            border: 1px solid rgba(255,255,255,.06); }
+
+    .stats {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 14px; margin-bottom: 24px;
+    }
+    .stat {
+        background: #1e293b; border-radius: 12px; padding: 16px 18px;
+        border: 1px solid rgba(255,255,255,.06);
+    }
     .stat-label { font-size: 11px; opacity: .55; text-transform: uppercase; letter-spacing: .8px; }
     .stat-value { font-size: 26px; font-weight: 700; margin-top: 6px; color: #22c55e; }
     .stat-value.danger { color: #f87171; }
-    table { width: 100%; border-collapse: collapse; background: #1e293b;
-            border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); }
-    th, td { padding: 12px 14px; text-align: left;
-             border-bottom: 1px solid rgba(255,255,255,.06); font-size: 13.5px; }
-    th { background: #0b1220; font-size: 11px;
-         text-transform: uppercase; letter-spacing: .8px; opacity: .6; }
+
+    .create-box {
+        background: #1e293b; border: 1px solid rgba(56,189,248,.3);
+        border-radius: 12px; padding: 20px;
+        margin-bottom: 28px;
+        box-shadow: 0 4px 20px rgba(56,189,248,.08);
+    }
+    .create-box h2 { margin: 0 0 16px; color: #38bdf8; }
+    .form-row {
+        display: grid; grid-template-columns: 140px 1fr 200px auto;
+        gap: 10px; align-items: end;
+    }
+    @media (max-width: 900px) {
+        .form-row { grid-template-columns: 1fr; }
+    }
+    .form-field label {
+        display: block; font-size: 11px; opacity: .65;
+        text-transform: uppercase; letter-spacing: .6px; margin-bottom: 5px;
+    }
+    .form-field input {
+        width: 100%; padding: 11px 13px;
+        background: #0b1220; color: #e2e8f0;
+        border: 1px solid rgba(255,255,255,.1);
+        border-radius: 8px; font-size: 13px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    .form-field input:focus {
+        outline: none; border-color: #38bdf8;
+        box-shadow: 0 0 0 3px rgba(56,189,248,.15);
+    }
+    .btn-create {
+        padding: 11px 22px;
+        background: #38bdf8; color: #06263a;
+        border: none; border-radius: 8px;
+        font-weight: 700; font-size: 13px;
+        cursor: pointer; white-space: nowrap;
+    }
+    .btn-create:hover { background: #22a8e0; }
+    .btn-create:disabled { opacity: .6; cursor: not-allowed; }
+
+    .form-result {
+        margin-top: 14px; padding: 12px 14px; border-radius: 8px;
+        font-size: 12.5px; font-family: ui-monospace, monospace;
+        display: none;
+    }
+    .form-result.success {
+        background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.3);
+        color: #4ade80; display: block;
+    }
+    .form-result.error {
+        background: rgba(220,38,38,.1); border: 1px solid rgba(220,38,38,.3);
+        color: #fca5a5; display: block;
+    }
+
+    table {
+        width: 100%; border-collapse: collapse;
+        background: #1e293b; border-radius: 12px; overflow: hidden;
+        border: 1px solid rgba(255,255,255,.06);
+    }
+    th, td {
+        padding: 12px 14px; text-align: left;
+        border-bottom: 1px solid rgba(255,255,255,.06); font-size: 13.5px;
+        vertical-align: top;
+    }
+    th {
+        background: #0b1220; font-size: 11px;
+        text-transform: uppercase; letter-spacing: .8px; opacity: .6;
+    }
     tr:last-child td { border-bottom: none; }
     tr:hover td { background: rgba(255,255,255,.02); }
     .clicks { font-weight: 700; color: #22c55e; font-size: 15px; }
     .empty { padding: 50px; text-align: center; opacity: .5; }
     a { color: #38bdf8; text-decoration: none; }
     a:hover { text-decoration: underline; }
-    .url-cell { max-width: 320px; word-break: break-all; font-size: 12px; opacity: .8; }
-    .refresh { display: inline-block; padding: 8px 14px; margin-bottom: 16px;
-               background: #1e293b; border: 1px solid rgba(255,255,255,.08);
-               color: #e2e8f0; border-radius: 8px; cursor: pointer; font-size: 13px; }
+    .url-cell { max-width: 260px; word-break: break-all; font-size: 12px; opacity: .85; }
+    .short-cell { font-family: ui-monospace, monospace; font-size: 12.5px; }
+    .short-cell .no-short { opacity: .4; font-style: italic; }
+    .refresh {
+        display: inline-block; padding: 8px 14px; margin-bottom: 16px;
+        background: #1e293b; border: 1px solid rgba(255,255,255,.08);
+        color: #e2e8f0; border-radius: 8px; cursor: pointer; font-size: 13px;
+    }
     .refresh:hover { background: #273449; }
     .error { color: #f87171; padding: 20px; text-align: center; }
     .tag { font-size: 10px; padding: 2px 6px; background: #334155; border-radius: 4px; opacity: .7; }
+
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .btn-sm {
+        padding: 5px 10px; border-radius: 6px;
+        font-size: 11.5px; font-weight: 600;
+        border: none; cursor: pointer; text-decoration: none;
+        display: inline-flex; align-items: center; gap: 4px;
+    }
+    .btn-copy { background: rgba(56,189,248,.15); color: #38bdf8; }
+    .btn-copy:hover { background: rgba(56,189,248,.25); }
+    .btn-open { background: rgba(34,197,94,.15); color: #22c55e; }
+    .btn-open:hover { background: rgba(34,197,94,.25); }
+    .btn-retry { background: rgba(251,191,36,.15); color: #fbbf24; }
+    .btn-retry:hover { background: rgba(251,191,36,.25); }
+    .btn-del { background: rgba(220,38,38,.15); color: #f87171; }
+    .btn-del:hover { background: rgba(220,38,38,.25); }
+
+    .toast {
+        position: fixed; bottom: 24px; right: 24px;
+        padding: 12px 20px; background: #22c55e; color: #06263a;
+        font-weight: 700; font-size: 13px; border-radius: 8px;
+        opacity: 0; pointer-events: none;
+        transition: opacity .25s ease;
+        box-shadow: 0 8px 24px rgba(0,0,0,.3);
+        z-index: 9999;
+    }
+    .toast.show { opacity: 1; }
+    .toast.error { background: #dc2626; color: #fff; }
 </style>
 </head>
 <body>
 <div class="wrap">
     <h1>{{ b.name }} — Admin Dashboard</h1>
-    <div class="sub">All registered files, downloads, and bypass attempts</div>
+    <div class="sub">Create, manage, and monitor all short links</div>
+
+    <div class="create-box">
+        <h2>➕ Create New Short Link</h2>
+        <div class="form-row">
+            <div class="form-field">
+                <label>File ID</label>
+                <input type="text" id="fId" placeholder="529596">
+            </div>
+            <div class="form-field">
+                <label>Destination URL (Telegram link)</label>
+                <input type="text" id="fUrl" placeholder="https://t.me/AKM_Files_Store_Bot?start=529596">
+            </div>
+            <div class="form-field">
+                <label>Alias (short link name)</label>
+                <input type="text" id="fAlias" placeholder="Mod_A">
+            </div>
+            <button class="btn-create" id="btnCreate" onclick="createShort()">
+                Create &amp; Shorten
+            </button>
+        </div>
+        <div class="form-result" id="formResult"></div>
+    </div>
 
     <div class="stats">
         <div class="stat"><div class="stat-label">Total Files</div><div class="stat-value" id="totalLinks">—</div></div>
@@ -561,22 +670,41 @@ ADMIN_HTML = """
 
     <table>
         <thead>
-            <tr><th>File ID</th><th>Destination</th><th>Downloads</th><th>Created</th></tr>
+            <tr>
+                <th>File ID</th>
+                <th>Short URL</th>
+                <th>Destination</th>
+                <th>Downloads</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
         </thead>
-        <tbody id="rows"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+        <tbody id="rows"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
     </table>
 
     <h2>Recent Bypass Attempts</h2>
-    <table style="margin-top:12px;">
+    <table style="margin-top:8px;">
         <thead>
             <tr><th>When</th><th>Reason</th><th>Referer</th><th>IP</th></tr>
         </thead>
         <tbody id="bypassRows"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
     </table>
 </div>
+
+<div class="toast" id="toast">Copied!</div>
+
 <script>
     const KEY = new URLSearchParams(location.search).get("key");
     const api = (path) => fetch(path + (path.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(KEY));
+
+    let toastTimer = null;
+    function toast(msg, isError) {
+        const t = document.getElementById("toast");
+        t.textContent = msg;
+        t.className = "toast show" + (isError ? " error" : "");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => { t.className = "toast"; }, 2000);
+    }
 
     function load() {
         api("/api/links")
@@ -586,20 +714,45 @@ ADMIN_HTML = """
                 const total = data.reduce((s,l) => s + (l.downloads || 0), 0);
                 document.getElementById("totalLinks").textContent = data.length;
                 document.getElementById("totalClicks").textContent = total;
+
                 if (!data.length) {
-                    tbody.innerHTML = '<tr><td colspan="4" class="empty">No files yet.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="6" class="empty">No files yet. Create one above.</td></tr>';
                     return;
                 }
-                tbody.innerHTML = data.map(l => `
+                tbody.innerHTML = data.map(l => {
+                    const shortCell = l.short_url
+                        ? `<a href="${l.short_url}" target="_blank">${l.short_url}</a>`
+                        : `<span class="no-short">${l.shorten_error ? "Failed: " + l.shorten_error : "Not shortened"}</span>`;
+
+                    const retryBtn = !l.short_url
+                        ? `<button class="btn-sm btn-retry" onclick="retryShorten('${l.token}')">↻ Shorten</button>`
+                        : "";
+
+                    const copyBtn = l.short_url
+                        ? `<button class="btn-sm btn-copy" onclick="copyText('${l.short_url}')">📋 Copy</button>`
+                        : "";
+
+                    return `
                     <tr>
                         <td><strong>${l.token || l.alias || "—"}</strong></td>
+                        <td class="url-cell short-cell">${shortCell}</td>
                         <td class="url-cell"><a href="${l.url}" target="_blank">${l.url}</a></td>
                         <td class="clicks">${(l.downloads || 0).toLocaleString()}</td>
                         <td>${(l.createdAt || "").slice(0, 10)}</td>
-                    </tr>`).join("");
+                        <td>
+                            <div class="actions">
+                                ${copyBtn}
+                                <a class="btn-sm btn-open" href="${l.url}" target="_blank">↗ Open</a>
+                                ${retryBtn}
+                                <button class="btn-sm btn-del" onclick="deleteLink('${l.token}')">🗑 Delete</button>
+                            </div>
+                        </td>
+                    </tr>`;
+                }).join("");
             })
-            .catch(err => { document.getElementById("rows").innerHTML =
-                '<tr><td colspan="4" class="error">' + err.message + '</td></tr>'; });
+            .catch(err => {
+                document.getElementById("rows").innerHTML = '<tr><td colspan="6" class="error">' + err.message + '</td></tr>';
+            });
 
         api("/api/bypasses")
             .then(r => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)))
@@ -610,7 +763,7 @@ ADMIN_HTML = """
                     tbody.innerHTML = '<tr><td colspan="4" class="empty">No bypass attempts 🎉</td></tr>';
                     return;
                 }
-                tbody.innerHTML = data.slice(0, 50).map(b => `
+                tbody.innerHTML = data.slice(0, 30).map(b => `
                     <tr>
                         <td>${(b.timestamp || "").slice(0, 19).replace("T", " ")}</td>
                         <td><span class="tag">${b.reason || "unknown"}</span></td>
@@ -625,6 +778,92 @@ ADMIN_HTML = """
             .then(d => { document.getElementById("totalSessions").textContent = d.active || 0; })
             .catch(() => {});
     }
+
+    function createShort() {
+        const id    = document.getElementById("fId").value.trim();
+        const url   = document.getElementById("fUrl").value.trim();
+        const alias = document.getElementById("fAlias").value.trim();
+        const btn   = document.getElementById("btnCreate");
+        const res   = document.getElementById("formResult");
+
+        if (!id || !url) {
+            res.className = "form-result error";
+            res.textContent = "❌ File ID and Destination URL are required.";
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = "Creating…";
+        res.className = "form-result";
+        res.style.display = "none";
+
+        fetch("/api/shorten", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-Admin-Key": KEY
+            },
+            body: JSON.stringify({ id, url, alias })
+        })
+        .then(r => r.json())
+        .then(d => {
+            btn.disabled = false;
+            btn.textContent = "Create & Shorten";
+
+            if (d.ok) {
+                res.className = "form-result success";
+                res.innerHTML = `✅ Created! Short URL: <a href="${d.short_url}" target="_blank">${d.short_url}</a> &nbsp; <button class="btn-sm btn-copy" onclick="copyText('${d.short_url}')">📋 Copy</button>`;
+                document.getElementById("fId").value = "";
+                document.getElementById("fUrl").value = "";
+                document.getElementById("fAlias").value = "";
+                load();
+            } else {
+                res.className = "form-result error";
+                res.textContent = "❌ " + (d.error || "Unknown error");
+            }
+        })
+        .catch(err => {
+            btn.disabled = false;
+            btn.textContent = "Create & Shorten";
+            res.className = "form-result error";
+            res.textContent = "❌ Network error: " + err.message;
+        });
+    }
+
+    function retryShorten(fileId) {
+        fetch("/api/links/" + encodeURIComponent(fileId) + "/shorten", {
+            method: "POST",
+            headers: { "X-Admin-Key": KEY }
+        })
+        .then(r => r.json())
+        .then(d => {
+            if (d.ok) { toast("Shortened: " + d.short_url); load(); }
+            else { toast(d.error || "Retry failed", true); }
+        })
+        .catch(() => toast("Network error", true));
+    }
+
+    function deleteLink(fileId) {
+        if (!confirm("Delete file '" + fileId + "'?\\nThis removes the record and its counter.")) return;
+
+        fetch("/api/links/" + encodeURIComponent(fileId), {
+            method: "DELETE",
+            headers: { "X-Admin-Key": KEY }
+        })
+        .then(r => r.json())
+        .then(d => {
+            if (d.ok) { toast("Deleted: " + fileId); load(); }
+            else { toast(d.error || "Delete failed", true); }
+        })
+        .catch(() => toast("Network error", true));
+    }
+
+    function copyText(text) {
+        navigator.clipboard.writeText(text)
+            .then(() => toast("Copied: " + text))
+            .catch(() => toast("Copy failed", true));
+    }
+
     load();
     setInterval(load, 15000);
 </script>
@@ -634,7 +873,7 @@ ADMIN_HTML = """
 
 
 # ==================================================================
-#  ROUTE HELPER
+#  HELPERS
 # ==================================================================
 def render_wall(title, subtitle, message, cta="Go Back", icon="🔒", status=403):
     return render_template_string(
@@ -659,8 +898,11 @@ def home():
             "GET  /api/count/<file_id>",
             "GET  /api/links?key=ADMIN_KEY",
             "GET  /api/bypasses?key=ADMIN_KEY",
-            "POST /api/shorten    (JSON: {id, url, alias})",
-            "POST /api/register   (JSON: {id, url, alias})",
+            "GET  /api/sessions/stats?key=ADMIN_KEY",
+            "GET/POST /api/register",
+            "POST /api/shorten",
+            "POST /api/links/<id>/shorten",
+            "DEL  /api/links/<id>",
         ],
     })
 
@@ -830,7 +1072,7 @@ def go():
 
 
 # ==================================================================
-#  PUBLIC API — live counter
+#  PUBLIC COUNT
 # ==================================================================
 @app.route("/api/count/<token>")
 def api_count(token):
@@ -842,7 +1084,7 @@ def api_count(token):
 
 
 # ==================================================================
-#  ADMIN API
+#  ADMIN
 # ==================================================================
 @app.route("/admin")
 def admin_panel():
@@ -902,7 +1144,7 @@ def api_sessions_stats():
 
 
 # ------------------------------------------------------------------
-#  REGISTER — adds a file (no ShrinkEarn call)
+#  REGISTER
 # ------------------------------------------------------------------
 @app.route("/api/register", methods=["GET", "POST"])
 def api_register():
@@ -930,24 +1172,22 @@ def api_register():
     if parsed.scheme not in ("http", "https"):
         return jsonify({"ok": False, "error": "Invalid URL scheme"}), 400
 
+    gate_url = build_gate_url(file_id)
     db.collection("links").document(file_id).set({
         "url": url,
         "alias": alias,
+        "gate_url": gate_url,
+        "short_url": "",
         "createdAt": datetime.datetime.now(datetime.timezone.utc),
         "creatorId": "api",
         "downloads": 0,
-    })
+    }, merge=True)
 
-    gate_url = build_gate_url(file_id)
-    return jsonify({
-        "ok": True,
-        "id": file_id,
-        "gate_url": gate_url,
-    })
+    return jsonify({"ok": True, "id": file_id, "gate_url": gate_url})
 
 
 # ------------------------------------------------------------------
-#  SHORTEN — register + call ShrinkEarn (the one-shot endpoint)
+#  SHORTEN — register + ShrinkEarn
 # ------------------------------------------------------------------
 @app.route("/api/shorten", methods=["POST", "GET"])
 def api_shorten():
@@ -975,21 +1215,20 @@ def api_shorten():
     if parsed.scheme not in ("http", "https"):
         return jsonify({"ok": False, "error": "Invalid URL scheme"}), 400
 
-    # 1. Save in Firestore
-    db.collection("links").document(file_id).set({
-        "url": url,
-        "alias": alias,
-        "createdAt": datetime.datetime.now(datetime.timezone.utc),
-        "creatorId": "api",
-        "downloads": 0,
-    })
-
-    # 2. Build gate URL
     gate_url = build_gate_url(file_id)
-
-    # 3. Call ShrinkEarn
     result = call_shrinkearn(gate_url, alias)
+
     if not result["ok"]:
+        db.collection("links").document(file_id).set({
+            "url": url,
+            "alias": alias,
+            "gate_url": gate_url,
+            "short_url": "",
+            "shorten_error": result["error"],
+            "createdAt": datetime.datetime.now(datetime.timezone.utc),
+            "creatorId": "api",
+            "downloads": 0,
+        }, merge=True)
         return jsonify({
             "ok": False,
             "id": file_id,
@@ -997,16 +1236,61 @@ def api_shorten():
             "error": result["error"],
         }), 502
 
+    short_url = result["short_url"]
+    db.collection("links").document(file_id).set({
+        "url": url,
+        "alias": alias,
+        "gate_url": gate_url,
+        "short_url": short_url,
+        "shorten_error": "",
+        "createdAt": datetime.datetime.now(datetime.timezone.utc),
+        "creatorId": "api",
+        "downloads": 0,
+    }, merge=True)
+
     return jsonify({
         "ok": True,
         "id": file_id,
         "gate_url": gate_url,
+        "short_url": short_url,
+    })
+
+
+# ------------------------------------------------------------------
+#  RETRY SHORTEN
+# ------------------------------------------------------------------
+@app.route("/api/links/<file_id>/shorten", methods=["POST", "GET"])
+def api_reshorten(file_id):
+    if not admin_ok():
+        abort(403)
+
+    doc = db.collection("links").document(file_id).get()
+    if not doc.exists:
+        return jsonify({"ok": False, "error": "File not found"}), 404
+
+    link = doc.to_dict()
+    alias = link.get("alias", file_id)
+    gate_url = link.get("gate_url") or build_gate_url(file_id)
+
+    result = call_shrinkearn(gate_url, alias)
+    if not result["ok"]:
+        db.collection("links").document(file_id).update({"shorten_error": result["error"]})
+        return jsonify({"ok": False, "id": file_id, "error": result["error"]}), 502
+
+    db.collection("links").document(file_id).update({
+        "short_url": result["short_url"],
+        "shorten_error": "",
+    })
+
+    return jsonify({
+        "ok": True,
+        "id": file_id,
         "short_url": result["short_url"],
     })
 
 
 # ------------------------------------------------------------------
-#  DELETE — remove a file
+#  DELETE
 # ------------------------------------------------------------------
 @app.route("/api/links/<file_id>", methods=["DELETE"])
 def api_delete_link(file_id):
@@ -1028,7 +1312,7 @@ def api_delete_link(file_id):
 # ==================================================================
 @app.errorhandler(400)
 def bad_request(e):
-    return jsonify({"ok": False, "error": e.description}), 400
+    return jsonify({"ok": False, "error": str(e.description)}), 400
 
 @app.errorhandler(403)
 def forbidden(e):
@@ -1036,11 +1320,33 @@ def forbidden(e):
 
 
 # ==================================================================
-#  RUN (local only — on Vercel this is ignored)
+#  VERCEL PATH FIX
 # ==================================================================
-# Vercel WSGI entry point — required for @vercel/python
+class _StripVercelPrefix:
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        path = environ.get("PATH_INFO", "")
+        for prefix in ("/api/index.py", "/api/index"):
+            if path == prefix:
+                environ["PATH_INFO"] = "/"
+                break
+            if path.startswith(prefix + "/"):
+                environ["PATH_INFO"] = path[len(prefix):]
+                break
+        return self.wsgi_app(environ, start_response)
+
+
+app.wsgi_app = _StripVercelPrefix(app.wsgi_app)
+
+# Vercel WSGI entry point
 handler = app
 
+
+# ==================================================================
+#  RUN (local only)
+# ==================================================================
 if __name__ == "__main__":
     print("\n" + "=" * 74)
     print(f"🚀 Redirector           http://{SERVER_HOST}:{SERVER_PORT}")
